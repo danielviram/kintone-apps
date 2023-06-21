@@ -1,7 +1,9 @@
 // Import required libraries or modules
-const express = require("express");
-const fetch = require("node-fetch");
-const dotenv = require('dotenv');
+
+import express from "express";
+import fetch from "node-fetch";
+import dotenv from "dotenv";
+
 dotenv.config();
 
 // Set up your server to listen for webhook requests
@@ -12,19 +14,25 @@ app.use(express.json());
 app.post("/webhook", async (req, res) => {
   try {
     // Extract the event type and record ID from the payload
-    const { event, record } = req.body;
-    const eventType = event.type;
-    const recordId = record.ID.value;
+    const { type } = req.body;
 
-    if (eventType === "CREATE") {
+    let orderRecordId = 0;
+
+    if (type === "ADD_RECORD" || type === "UPDATE_RECORD") {
       // Handle order placement event
-      await handleOrderPlacement(recordId);
-    } else if (eventType === "UPDATE") {
-      // Handle order update event
-      await handleOrderUpdate(recordId);
-    } else if (eventType === "DELETE") {
+      const { record } = req.body;
+      orderRecordId =  record.order_rn.value;
+      if (type === "ADD_RECORD") {
+        // Handle order placement event
+        await handleOrderPlacement(orderRecordId);
+      } else if (type === "UPDATE_RECORD") {
+        // Handle order update event
+        await handleOrderUpdate(orderRecordId);
+      }
+    } else if (type === "DELETE_RECORD") {
       // Handle order delete event
-      await handleOrderDelete(recordId);
+      const { recordId } = req.body;
+      // await handleOrderDelete(recordId);
     }
 
     res.sendStatus(200);
@@ -34,7 +42,6 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-
 // Functions to handle order events
 async function handleOrderPlacement(recordId) {
   // Retrieve the order record from kintone based on the record ID
@@ -42,7 +49,6 @@ async function handleOrderPlacement(recordId) {
   const response = await fetch(getOrderEndpoint, {
     method: "GET",
     headers: {
-      "Content-Type": "application/json",
       "X-Cybozu-API-Token": process.env.ORDER_TRACKING_APP_API_TOKEN,
     },
   });
@@ -50,13 +56,14 @@ async function handleOrderPlacement(recordId) {
 
   // Extract necessary information from the order record
   const orderType = record.order_type.value;
-  const orderedItems = record.ordered_items.value;
+  const itemRecordId = record.item_rn.value;
+  const orderedQuantity = record.qty.value;
 
   // Update the item master app's stock count based on the order type and ordered items
   if (orderType === "Purchase") {
-    await updateItemMasterStockCount(orderedItems, "increase");
-  } else if (orderType === "Sales") {
-    await updateItemMasterStockCount(orderedItems, "decrease");
+    await updateItemMasterStockCount(itemRecordId, orderedQuantity, "increase");
+  } else if (orderType === "Sale") {
+    await updateItemMasterStockCount(itemRecordId, orderedQuantity, "decrease");
   }
 
   // Perform any other necessary actions for order placement event
@@ -69,21 +76,22 @@ async function handleOrderUpdate(recordId) {
   const response = await fetch(getOrderEndpoint, {
     method: "GET",
     headers: {
-      "Content-Type": "application/json",
       "X-Cybozu-API-Token": process.env.ORDER_TRACKING_APP_API_TOKEN,
     },
   });
+
   const { record } = await response.json();
 
   // Extract necessary information from the updated order record
   const orderType = record.order_type.value;
-  const orderedItems = record.ordered_items.value;
+  const itemRecordId = record.item_rn.value;
+  const orderedQuantity = record.qty.value;
 
   // Update the item master app's stock count based on the order type and updated ordered items
   if (orderType === "Purchase") {
-    await updateItemMasterStockCount(orderedItems, "increase");
-  } else if (orderType === "Sales") {
-    await updateItemMasterStockCount(orderedItems, "decrease");
+    await updateItemMasterStockCount(itemRecordId, orderedQuantity, "increase");
+  } else if (orderType === "Sale") {
+    await updateItemMasterStockCount(itemRecordId, orderedQuantity, "decrease");
   }
 
   // Perform any necessary actions for order update event
@@ -109,7 +117,7 @@ async function handleOrderDelete(recordId) {
   // Update the item master app's stock count based on the order type and ordered items
   if (orderType === "Purchase") {
     await updateItemMasterStockCount(orderedItems, "decrease");
-  } else if (orderType === "Sales") {
+  } else if (orderType === "Sale") {
     await updateItemMasterStockCount(orderedItems, "increase");
   }
 
@@ -123,52 +131,46 @@ const server = app.listen(3000, () => {
 });
 
 // Function to update the item master app's stock count
-async function updateItemMasterStockCount(orderedItems, action) {
+async function updateItemMasterStockCount(itemRecordId, orderedQuantity, action) {
   // Iterate over the ordered items and update the stock count
-  for (const item of orderedItems) {
-    const itemCode = item.item_code.value;
-    const orderedQuantity = item.quantity.value;
 
-    // Retrieve the current stock count of the item from the item master app
-    const getItemEndpoint = `https://${process.env.KINTONE_DOMAIN_NAME}.kintone.com/k/v1/record.json?app=${process.env.ITEMS_MASTER_APP_ID}&query=item_code="${itemCode}"`;
-    const response = await fetch(getItemEndpoint, {
-      method: "GET",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Cybozu-API-Token": process.env.ITEMS_MASTER_APP_API_TOKEN,
-      },
-    });
-    const { records } = await response.json();
+  // Retrieve the current stock count of the item from the item master app
+  const getItemEndpoint = `https://${process.env.KINTONE_DOMAIN_NAME}.kintone.com/k/v1/record.json?app=${process.env.ITEMS_MASTER_APP_ID}&id=${itemRecordId}`;
 
-    if (records.length === 1) {
-      const itemRecord = records[0];
-      const currentStockCount = itemRecord.stock_count.value;
+  const response = await fetch(getItemEndpoint, {
+    method: "GET",
+    headers: {
+      "X-Cybozu-API-Token": process.env.ITEMS_MASTER_APP_API_TOKEN,
+    },
+  });
+  const { record } = await response.json();
 
-      // Calculate the updated stock count based on the action (increase or decrease)
-      let updatedStockCount;
-      if (action === "increase") {
-        updatedStockCount = currentStockCount + orderedQuantity;
-      } else if (action === "decrease") {
-        updatedStockCount = currentStockCount - orderedQuantity;
-      }
+  const currentStockCount = record.stock.value;
 
-      // Update the stock count in the item master app
-      const itemRecordId = itemRecord.$id.value;
-      const updateItemEndpoint = `https://${process.env.KINTONE_DOMAIN_NAME}.kintone.com/k/v1/record.json?app=${process.env.ITEMS_MASTER_APP_ID}&id=${itemRecordId}`;
-      await fetch(updateItemEndpoint, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Cybozu-API-Token": process.env.ITEMS_MASTER_APP_API_TOKEN,
-        },
-        body: JSON.stringify({
-          record: {
-            stock_count: {
-              value: updatedStockCount,
-            },
-          },
-        }),
-      });
-    }
+  // Calculate the updated stock count based on the action (increase or decrease)
+  let updatedStockCount;
+  if (action === "increase") {
+    updatedStockCount = Number(currentStockCount) + Number(orderedQuantity);
+  } else if (action === "decrease") {
+    updatedStockCount = Number(currentStockCount) - Number(orderedQuantity);
   }
+
+  // Update the stock count in the item master app
+  const updateItemEndpoint = `https://${process.env.KINTONE_DOMAIN_NAME}.kintone.com/k/v1/record.json`;
+  const ress = await fetch(updateItemEndpoint, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Cybozu-API-Token": process.env.ITEMS_MASTER_APP_API_TOKEN,
+    },
+    body: JSON.stringify({
+      app: process.env.ITEMS_MASTER_APP_ID,
+      id: itemRecordId,
+      record: {
+        stock: {
+          value: updatedStockCount,
+        },
+      }
+    }),
+  });
 }
